@@ -1,27 +1,27 @@
 """
 OMR Sheet Answer Detector
-Automatically detects filled circles from OMR sheet image
+Detects both filled and unfilled circles and determines which option is marked
 """
 
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from collections import defaultdict
 import sys
+import json
 
-def detect_omr_answers(image_path):
+def detect_all_circles(image_path):
     """
-    Detect answers from OMR sheet image
+    Detect both filled and unfilled circles from OMR sheet
     """
     print("="*80)
-    print("OMR Sheet Answer Detection")
+    print("OMR Sheet Circle Detection")
     print("="*80)
     
     # Load image
     img = cv2.imread(image_path)
     if img is None:
         print(f"Error: Could not load image '{image_path}'")
-        return None
+        return None, None, None
     
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -29,16 +29,15 @@ def detect_omr_answers(image_path):
     height, width = gray.shape
     print(f"\nImage loaded: {width}x{height} pixels")
     
-    # Answer grid boundaries (adjusted: 3 rows up, 1 row down)
-    # Each row is approximately 50px, so: up = -150px, down = +50px
-    grid_y_min = 900   # উপরে 3 লাইন বেশি (1050 - 150)
-    grid_y_max = 2400  # নিচে 1 লাইন বেশি (2350 + 50)
+    # Answer grid boundaries
+    grid_y_min = 900
+    grid_y_max = 2400
     grid_x_min = 40
     grid_x_max = 1450
     
-    print(f"Scanning answer grid area...")
+    print(f"Scanning area: Y({grid_y_min}-{grid_y_max}), X({grid_x_min}-{grid_x_max})")
     
-    # Detect circles using HoughCircles
+    # Detect all circles
     circles = cv2.HoughCircles(
         gray,
         cv2.HOUGH_GRADIENT,
@@ -52,12 +51,13 @@ def detect_omr_answers(image_path):
     
     if circles is None:
         print("❌ No circles detected!")
-        return None
+        return None, None, None
     
     circles = np.uint16(np.around(circles[0]))
-    print(f"✓ Found {len(circles)} circles in image")
+    print(f"✓ Found {len(circles)} total circles")
     
-    # Filter filled circles in answer area
+    # Separate filled and unfilled circles
+    all_circles = []
     filled_circles = []
     
     for circle in circles:
@@ -68,270 +68,256 @@ def detect_omr_answers(image_path):
             continue
         
         # Check if filled (dark)
-        roi_size = r
-        roi_y1 = max(0, y - roi_size)
-        roi_y2 = min(height, y + roi_size)
-        roi_x1 = max(0, x - roi_size)
-        roi_x2 = min(width, x + roi_size)
+        roi_y1 = max(0, y - r)
+        roi_y2 = min(height, y + r)
+        roi_x1 = max(0, x - r)
+        roi_x2 = min(width, x + r)
         
         roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
         
         if roi.size > 0:
             mean_intensity = np.mean(roi)
             
-            # Only dark/filled circles
-            if mean_intensity < 135:
-                filled_circles.append({
-                    'x': x,
-                    'y': y,
-                    'r': r,
-                    'intensity': mean_intensity
-                })
+            circle_data = {
+                'x': x,
+                'y': y,
+                'r': r,
+                'intensity': mean_intensity,
+                'filled': mean_intensity < 135
+            }
+            
+            all_circles.append(circle_data)
+            
+            if circle_data['filled']:
+                filled_circles.append(circle_data)
     
-    print(f"✓ Detected {len(filled_circles)} filled circles")
+    print(f"✓ Total circles in grid: {len(all_circles)}")
+    print(f"✓ Filled circles: {len(filled_circles)}")
+    print(f"✓ Unfilled circles: {len(all_circles) - len(filled_circles)}")
     
-    if len(filled_circles) == 0:
-        print("❌ No filled circles found!")
-        return None
+    if not all_circles:
+        print("❌ No circles found in grid!")
+        return None, None, None
     
-    # Sort by Y position
-    filled_circles.sort(key=lambda c: c['y'])
+    return img_rgb, all_circles, filled_circles, (grid_x_min, grid_y_min, grid_x_max, grid_y_max)
+
+def group_circles_by_columns(circles):
+    """
+    Group circles by columns (X position)
+    Each column contains multiple questions, each question has 4 options
+    """
+    if not circles:
+        return []
     
-    # Get grid parameters
-    all_y = [c['y'] for c in filled_circles]
-    all_x = [c['x'] for c in filled_circles]
+    # Sort by X position to find columns
+    circles_sorted = sorted(circles, key=lambda c: c['x'])
     
-    y_min, y_max = min(all_y), max(all_y)
-    x_min, x_max = min(all_x), max(all_x)
+    # Find major X position gaps to identify columns
+    x_positions = [c['x'] for c in circles_sorted]
+    x_gaps = []
+    for i in range(1, len(x_positions)):
+        gap = x_positions[i] - x_positions[i-1]
+        if gap > 150:  # Large gap = column boundary
+            x_gaps.append((x_positions[i-1] + x_positions[i]) / 2)
     
-    grid_height = y_max - y_min
-    grid_width = x_max - x_min
+    # Determine column boundaries
+    column_boundaries = [0] + x_gaps + [2000]
     
-    # Expected: 25 rows per column, row height
-    row_height = grid_height / 24  # 25 rows = 24 gaps
-    column_width = grid_width / 3  # 4 columns = 3 gaps
+    # Group circles into columns
+    columns = []
+    for i in range(len(column_boundaries) - 1):
+        left = column_boundaries[i]
+        right = column_boundaries[i + 1]
+        
+        column_circles = [c for c in circles if left <= c['x'] < right]
+        if column_circles:
+            # Sort by Y (top to bottom)
+            column_circles.sort(key=lambda c: c['y'])
+            columns.append(column_circles)
     
-    print(f"✓ Grid analysis complete")
-    print(f"  - Y range: {y_min} to {y_max}")
-    print(f"  - X range: {x_min} to {x_max}")
-    print(f"  - Row height: {row_height:.1f}px")
-    print(f"  - Column width: {column_width:.1f}px")
+    return columns
+
+def determine_answers(all_circles):
+    """
+    Determine which option is filled for each question
+    Structure: 4 columns, each column has multiple questions (top to bottom)
+    Each question has 4 options (left to right)
+    """
+    columns = group_circles_by_columns(all_circles)
     
-    # Map circles to questions
-    print(f"\nMapping circles to questions...")
+    print(f"\n✓ Organized into {len(columns)} columns")
     
     answers = {}
-    debug_info = []
+    questions_per_column = 0
     
-    for circle in filled_circles:
-        x, y = circle['x'], circle['y']
+    for col_idx, column in enumerate(columns):
+        print(f"\nColumn {col_idx + 1}:")
         
-        # Determine row (0-24)
-        row_index = int(round((y - y_min) / row_height))
-        row_index = max(0, min(24, row_index))
+        # Group circles in this column by Y position (each group = 1 question with 4 options)
+        column_sorted = sorted(column, key=lambda c: c['y'])
         
-        # Determine column (0-3)
-        col_index = int(round((x - x_min) / column_width))
-        col_index = max(0, min(3, col_index))
+        question_groups = []
+        current_group = [column_sorted[0]]
         
-        # Question number
-        question_num = col_index * 25 + row_index + 1
+        for i in range(1, len(column_sorted)):
+            # If Y difference is small (<30px), same question
+            if abs(column_sorted[i]['y'] - current_group[-1]['y']) < 30:
+                current_group.append(column_sorted[i])
+            else:
+                # New question
+                current_group.sort(key=lambda c: c['x'])  # Sort options left to right
+                question_groups.append(current_group)
+                current_group = [column_sorted[i]]
         
-        if not (1 <= question_num <= 100):
-            continue
+        # Add last group
+        current_group.sort(key=lambda c: c['x'])
+        question_groups.append(current_group)
         
-        # Determine option (1-4) based on X position within column
-        col_x_start = x_min + col_index * column_width
-        col_x_end = x_min + (col_index + 1) * column_width if col_index < 3 else x_max
-        col_width_actual = col_x_end - col_x_start
+        if col_idx == 0:
+            questions_per_column = len(question_groups)
         
-        x_in_col = x - col_x_start
-        option_width = col_width_actual / 4 if col_width_actual > 0 else 100
-        option = int(x_in_col / option_width) + 1 if option_width > 0 else 1
-        option = max(1, min(4, option))
-        
-        # Keep darkest circle for each question
-        if question_num not in answers or circle['intensity'] < answers[question_num]['intensity']:
-            answers[question_num] = {
-                'option': option,
-                'intensity': circle['intensity'],
-                'x': x,
-                'y': y,
-                'r': circle['r']
-            }
-            debug_info.append({
-                'q': question_num,
-                'opt': option,
-                'x': x,
-                'y': y,
-                'col': col_index,
-                'row': row_index
-            })
+        # Process each question in this column
+        for q_idx, question_options in enumerate(question_groups):
+            question_num = col_idx * questions_per_column + q_idx + 1
+            
+            # Find which option is filled
+            for opt_idx, circle in enumerate(question_options):
+                option_num = opt_idx + 1
+                
+                if circle['filled']:
+                    answers[question_num] = option_num
+                    print(f"  Q{question_num}: Option {option_num} filled")
+                    break
     
-    print(f"✓ Mapped {len(answers)} answers to questions")
-    
-    # Create debug visualization
-    print(f"\nCreating debug visualization...")
+    return answers, columns
+
+def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
+    """
+    Create debug visualization showing all circles and marked answers
+    """
+    print("\nCreating visualization...")
     
     debug_img = img_rgb.copy()
     
-    # Draw grid area
-    cv2.rectangle(debug_img, (grid_x_min, grid_y_min), (grid_x_max, grid_y_max), 
-                  (255, 255, 0), 2)
+    # Draw grid boundary
+    gx1, gy1, gx2, gy2 = grid_bounds
+    cv2.rectangle(debug_img, (gx1, gy1), (gx2, gy2), (255, 255, 0), 2)
     
-    # Draw all filled circles (gray)
-    for circle in filled_circles:
-        cv2.circle(debug_img, (circle['x'], circle['y']), 
-                   circle['r'], (200, 200, 200), 1)
+    # Draw all circles
+    for circle in all_circles:
+        x, y, r = circle['x'], circle['y'], circle['r']
+        
+        if circle['filled']:
+            # Filled circle - green with thick border
+            cv2.circle(debug_img, (x, y), r+3, (0, 255, 0), 3)
+        else:
+            # Unfilled circle - gray thin border
+            cv2.circle(debug_img, (x, y), r+1, (150, 150, 150), 1)
     
-    # Highlight detected answers (green)
-    for q_num in sorted(answers.keys()):
-        ans = answers[q_num]
-        x, y, r = ans['x'], ans['y'], ans['r']
-        option = ans['option']
-        
-        # Draw circle
-        cv2.circle(debug_img, (x, y), r+3, (0, 255, 0), 2)
-        
-        # Draw question number
-        text = f"Q{q_num}"
-        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
-        text_x = x - text_size[0] // 2
-        text_y = y - r - 5
-        
-        # Background for text
-        cv2.rectangle(debug_img, 
-                     (text_x - 2, text_y - text_size[1] - 2),
-                     (text_x + text_size[0] + 2, text_y + 2),
-                     (0, 0, 0), -1)
-        
-        # Text
-        cv2.putText(debug_img, text, (text_x, text_y),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1, cv2.LINE_AA)
+    # Add question numbers (will be done per question group)
+    # Group by Y position to show question numbers
+    all_sorted = sorted(all_circles, key=lambda c: c['y'])
+    question_rows = []
+    current_row = [all_sorted[0]]
     
-    # Add title
-    title = f"OMR Detection: {len(answers)}/100 answers detected"
+    for i in range(1, len(all_sorted)):
+        if abs(all_sorted[i]['y'] - current_row[-1]['y']) < 30:
+            current_row.append(all_sorted[i])
+        else:
+            question_rows.append(current_row)
+            current_row = [all_sorted[i]]
+    question_rows.append(current_row)
+    
+    # Count total questions (rows)
+    total_questions = len(question_rows)
+    
+    # Title
+    title = f"Detected: {len(answers_dict)} answers from {total_questions} questions"
     cv2.putText(debug_img, title, (50, 50),
                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 0), 2, cv2.LINE_AA)
     
-    # Save debug image
-    debug_filename = 'omr_detection_result.png'
+    # Save
+    output_file = 'omr_detection_result.png'
     plt.figure(figsize=(15, 28))
     plt.imshow(debug_img)
     plt.title(title, fontsize=16, pad=20)
     plt.axis('off')
     plt.tight_layout()
-    plt.savefig(debug_filename, dpi=200, bbox_inches='tight')
+    plt.savefig(output_file, dpi=200, bbox_inches='tight')
     plt.close()
     
-    print(f"✓ Debug image saved: {debug_filename}")
-    
-    return answers
+    print(f"✓ Visualization saved: {output_file}")
+    return output_file
 
-def save_results(answers, output_file='detected_answers.txt'):
+def save_results(answers):
     """
-    Save detected answers to file
+    Save answers in JSON format
     """
-    if not answers:
-        print("No answers to save!")
-        return
+    # Convert to string keys for JSON
+    result = {str(q): opt for q, opt in sorted(answers.items())}
     
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("OMR Sheet - Detected Answers\n")
-        f.write("="*70 + "\n\n")
-        
-        for q in sorted(answers.keys()):
-            f.write(f"প্রশ্ন {q:3d} - অপশন {answers[q]['option']}\n")
-        
-        f.write(f"\n{'='*70}\n")
-        f.write(f"Total: {len(answers)}/100\n")
-        
-        # Missing questions
-        missing = [q for q in range(1, 101) if q not in answers]
-        if missing:
-            f.write(f"\nMissing ({len(missing)}): {', '.join(map(str, missing))}\n")
+    # Save to JSON file
+    json_file = 'detected_answers.json'
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
     
-    print(f"✓ Results saved: {output_file}")
-    
-    # Also save CSV
-    csv_file = 'detected_answers.csv'
-    with open(csv_file, 'w', encoding='utf-8') as f:
-        f.write("Question,Answer\n")
-        for q in range(1, 101):
-            ans = answers[q]['option'] if q in answers else ''
-            f.write(f"{q},{ans}\n")
-    
-    print(f"✓ CSV saved: {csv_file}")
-
-def print_results(answers):
-    """
-    Print results to console
-    """
-    if not answers:
-        print("\n❌ No answers detected!")
-        return
-    
-    print("\n" + "="*80)
-    print("DETECTED ANSWERS")
-    print("="*80 + "\n")
-    
-    # Print in 4 columns
-    for col in range(4):
-        print(f"\nColumn {col+1} (Questions {col*25+1}-{(col+1)*25}):")
-        print("-"*60)
-        
-        for row in range(25):
-            q = col * 25 + row + 1
-            if q in answers:
-                print(f"  প্রশ্ন {q:3d} → অপশন {answers[q]['option']}")
-            else:
-                print(f"  প্রশ্ন {q:3d} → [NOT DETECTED]")
-    
-    print("\n" + "="*80)
-    print(f"Total: {len(answers)}/100 answers detected")
-    
-    missing = [q for q in range(1, 101) if q not in answers]
-    if missing:
-        print(f"Missing: {len(missing)} questions")
-        if len(missing) <= 20:
-            print(f"Missing questions: {', '.join(map(str, missing))}")
-    
-    print("="*80)
+    print(f"✓ Results saved: {json_file} ({len(result)} answers)")
 
 def main():
-    """
-    Main function
-    """
-    # Default image path
-    image_path = 'nexesai.test_omr-sheet_16_answer.png'
+    """Main function"""
+    # Default image
+    image_path = 'nexesai.test_omr-sheet_15_answer.png'
     
-    # Check if image path provided as argument
+    # Check for command line argument
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
     
     print(f"\nProcessing: {image_path}\n")
     
-    # Detect answers
-    answers = detect_omr_answers(image_path)
+    # Detect circles
+    result = detect_all_circles(image_path)
     
-    if answers:
-        # Save results
-        save_results(answers)
-        
-        # Print results
-        print_results(answers)
-        
-        print("\n✅ Detection complete!")
-        print("\nGenerated files:")
-        print("  📄 detected_answers.txt  - Full results in text format")
-        print("  📊 detected_answers.csv  - CSV format for Excel")
-        print("  🖼️  omr_detection_result.png - Debug visualization")
-    else:
+    if result is None or result[0] is None:
         print("\n❌ Detection failed!")
         return 1
+    
+    img_rgb, all_circles, filled_circles, grid_bounds = result
+    
+    # Determine answers
+    answers, rows = determine_answers(all_circles)
+    
+    # Create visualization
+    create_visualization(img_rgb, all_circles, answers, grid_bounds)
+    
+    # Save results
+    save_results(answers)
+    
+    # Count total questions
+    columns = group_circles_by_columns(all_circles)
+    total_questions = 0
+    for col in columns:
+        col_sorted = sorted(col, key=lambda c: c['y'])
+        q_groups = []
+        curr = [col_sorted[0]]
+        for i in range(1, len(col_sorted)):
+            if abs(col_sorted[i]['y'] - curr[-1]['y']) < 30:
+                curr.append(col_sorted[i])
+            else:
+                q_groups.append(curr)
+                curr = [col_sorted[i]]
+        q_groups.append(curr)
+        total_questions += len(q_groups)
+    
+    print(f"\n✅ Detection complete!")
+    print(f"\nSummary:")
+    print(f"  Total questions: {total_questions}")
+    print(f"  Answered: {len(answers)}")
+    print(f"  Unanswered: {total_questions - len(answers)}")
+    print(f"\nGenerated files:")
+    print(f"  📄 detected_answers.json - Question-Answer pairs")
+    print(f"  🖼️  omr_detection_result.png - Visualization")
     
     return 0
 
 if __name__ == "__main__":
     exit(main())
-
