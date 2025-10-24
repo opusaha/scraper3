@@ -8,6 +8,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import json
+import io
+
+# Set UTF-8 encoding for console output
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def detect_all_circles(image_path):
     """
@@ -47,7 +51,7 @@ def detect_all_circles(image_path):
     )
     
     if circles is None:
-        print("❌ No circles detected!")
+        print("No circles detected!")
         return None, None, None
     
     circles = np.uint16(np.around(circles[0]))
@@ -88,7 +92,7 @@ def detect_all_circles(image_path):
                 filled_circles.append(circle_data)
     
     if not all_circles:
-        print("❌ No circles found in grid!")
+        print("No circles found in grid!")
         return None, None, None
     
     return img_rgb, all_circles, filled_circles, (grid_x_min, grid_y_min, grid_x_max, grid_y_max)
@@ -179,9 +183,10 @@ def determine_answers(all_circles):
     
     return answers, columns
 
-def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
+def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds, wrong_answers=None):
     """
     Create debug visualization showing all circles and marked answers
+    Mark wrong answers in red if provided
     """
     debug_img = img_rgb.copy()
     
@@ -189,16 +194,67 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
     gx1, gy1, gx2, gy2 = grid_bounds
     cv2.rectangle(debug_img, (gx1, gy1), (gx2, gy2), (255, 255, 0), 2)
     
+    # Create wrong question set and correct answer map for quick lookup
+    wrong_questions = set()
+    correct_answers_map = {}
+    if wrong_answers:
+        wrong_questions = {item['question'] for item in wrong_answers}
+        correct_answers_map = {item['question']: item['correct'] for item in wrong_answers}
+    
+    # Group circles by question to identify which question each circle belongs to
+    columns = group_circles_by_columns(all_circles)
+    circle_to_question = {}
+    circle_to_option = {}  # Maps circle to its option number (1-4)
+    questions_per_column = 0
+    
+    for col_idx, column in enumerate(columns):
+        column_sorted = sorted(column, key=lambda c: c['y'])
+        question_groups = []
+        current_group = [column_sorted[0]]
+        
+        for i in range(1, len(column_sorted)):
+            if abs(column_sorted[i]['y'] - current_group[-1]['y']) < 30:
+                current_group.append(column_sorted[i])
+            else:
+                current_group.sort(key=lambda c: c['x'])
+                question_groups.append(current_group)
+                current_group = [column_sorted[i]]
+        
+        current_group.sort(key=lambda c: c['x'])
+        question_groups.append(current_group)
+        
+        if col_idx == 0:
+            questions_per_column = len(question_groups)
+        
+        for q_idx, question_options in enumerate(question_groups):
+            question_num = col_idx * questions_per_column + q_idx + 1
+            for opt_idx, circle in enumerate(question_options):
+                circle_key = (circle['x'], circle['y'])
+                circle_to_question[circle_key] = question_num
+                circle_to_option[circle_key] = opt_idx + 1  # Option number 1-4
+    
     # Draw all circles
     for circle in all_circles:
         x, y, r = circle['x'], circle['y'], circle['r']
+        circle_key = (x, y)
+        q_num = circle_to_question.get(circle_key)
+        opt_num = circle_to_option.get(circle_key)
+        is_wrong_question = q_num in wrong_questions
+        is_correct_option = is_wrong_question and opt_num == correct_answers_map.get(q_num)
         
         if circle['filled']:
-            # Filled circle - green with thick border
-            cv2.circle(debug_img, (x, y), r+3, (0, 255, 0), 3)
+            # Filled circle - red if wrong answer, green if correct
+            color = (255, 0, 0) if is_wrong_question else (0, 255, 0)
+            cv2.circle(debug_img, (x, y), r+3, color, 3)
         else:
-            # Unfilled circle - gray thin border
-            cv2.circle(debug_img, (x, y), r+1, (150, 150, 150), 1)
+            # Unfilled circle
+            if is_correct_option:
+                # Fill the correct answer circle in green for wrong questions
+                cv2.circle(debug_img, (x, y), r, (0, 255, 0), -1)  # -1 fills the circle
+                cv2.circle(debug_img, (x, y), r+2, (0, 255, 0), 2)  # Green border
+            else:
+                # Gray thin border for other unfilled circles
+                cv2.circle(debug_img, (x, y), r+1, (150, 150, 150), 1)
     
     # Add question numbers (will be done per question group)
     # Group by Y position to show question numbers
@@ -215,7 +271,14 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
     question_rows.append(current_row)
     
     # Title
-    title = f"Detected: {len(answers_dict)} answers"
+    if wrong_answers is not None:
+        total = len(answers_dict)
+        wrong_count = len(wrong_answers)
+        right_count = total - wrong_count
+        accuracy = (right_count / total * 100) if total > 0 else 0
+        title = f"Detected: {len(answers_dict)} answers | Right: {right_count} | Wrong: {wrong_count} | Accuracy: {accuracy:.1f}%"
+    else:
+        title = f"Detected: {len(answers_dict)} answers"
     
     # Save
     output_file = 'omr_detection_result.png'
@@ -227,7 +290,7 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
     plt.savefig(output_file, dpi=200, bbox_inches='tight')
     plt.close()
     
-    print(f"✓ Visualization saved: {output_file}")
+    print(f"Visualization saved: {output_file}")
     return output_file
 
 def save_results(answers):
@@ -242,12 +305,85 @@ def save_results(answers):
     with open(json_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     
-    print(f"✓ Results saved: {json_file} ({len(result)} answers)")
+    print(f"Results saved: {json_file} ({len(result)} answers)")
+
+def compare_with_correct_answers(detected_answers, correct_answer_file='correct_answer.json'):
+    """
+    Compare detected answers with correct answers
+    ক=1, খ=2, গ=3, ঘ=4
+    """
+    # Mapping
+    bengali_to_num = {'ক': 1, 'খ': 2, 'গ': 3, 'ঘ': 4}
+    num_to_bengali = {1: 'ক', 2: 'খ', 3: 'গ', 4: 'ঘ'}
+    
+    try:
+        with open(correct_answer_file, 'r', encoding='utf-8') as f:
+            correct_answers = json.load(f)
+    except FileNotFoundError:
+        print(f"\nCorrect answer file not found: {correct_answer_file}")
+        return
+    
+    # Convert correct answers from Bengali to numbers
+    correct_nums = {}
+    for q, ans in correct_answers.items():
+        if ans in bengali_to_num:
+            correct_nums[int(q)] = bengali_to_num[ans]
+    
+    # Compare
+    total = len(correct_nums)
+    right = 0
+    wrong = 0
+    wrong_list = []
+    
+    print("\n" + "="*70)
+    print("ANSWER COMPARISON REPORT")
+    print("="*70)
+    
+    for q_num in sorted(correct_nums.keys()):
+        detected = detected_answers.get(q_num, None)
+        correct = correct_nums[q_num]
+        
+        if detected == correct:
+            right += 1
+        else:
+            wrong += 1
+            wrong_list.append({
+                'question': q_num,
+                'detected': detected,
+                'correct': correct,
+                'detected_bengali': num_to_bengali.get(detected, '?') if detected else '?',
+                'correct_bengali': num_to_bengali[correct]
+            })
+    
+    # Summary
+    print(f"\nRight (সঠিক উত্তর): {right}/{total}")
+    print(f"Wrong (ভুল উত্তর): {wrong}/{total}")
+    accuracy = (right / total * 100) if total > 0 else 0
+    print(f"Accuracy (নির্ভুলতা): {accuracy:.2f}%")
+    
+    # Show wrong answers
+    if wrong_list:
+        print(f"\n{'='*70}")
+        print("Wrong Answers (ভুল উত্তরগুলো):")
+        print("="*70)
+        print(f"{'প্রশ্ন':<8} {'সনাক্তকৃত':<15} {'সঠিক উত্তর':<15}")
+        print(f"{'Question':<8} {'Detected':<15} {'Correct':<15}")
+        print("-"*70)
+        
+        for item in wrong_list:
+            q = item['question']
+            det = f"{item['detected']} ({item['detected_bengali']})" if item['detected'] else "Not detected"
+            cor = f"{item['correct']} ({item['correct_bengali']})"
+            print(f"{q:<8} {det:<15} {cor:<15}")
+    
+    print("="*70 + "\n")
+    
+    return right, wrong, wrong_list
 
 def main():
     """Main function"""
     # Default image
-    image_path = 'nexesai.test_omr-sheet_15_answer.png'
+    image_path = 'nexesai.test_omr-sheet_16_answer.png'
     
     # Check for command line argument
     if len(sys.argv) > 1:
@@ -259,7 +395,7 @@ def main():
     result = detect_all_circles(image_path)
     
     if result is None or result[0] is None:
-        print("\n❌ Detection failed!")
+        print("\nDetection failed!")
         return 1
     
     img_rgb, all_circles, filled_circles, grid_bounds = result
@@ -267,11 +403,15 @@ def main():
     # Determine answers
     answers, rows = determine_answers(all_circles)
     
-    # Create visualization
-    create_visualization(img_rgb, all_circles, answers, grid_bounds)
-    
     # Save results
     save_results(answers)
+    
+    # Compare with correct answers
+    comparison_result = compare_with_correct_answers(answers, 'correct_answer.json')
+    
+    # Create visualization with wrong answers marked
+    wrong_list = comparison_result[2] if comparison_result else None
+    create_visualization(img_rgb, all_circles, answers, grid_bounds, wrong_list)
     
     # Count total questions
     columns = group_circles_by_columns(all_circles)
