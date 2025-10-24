@@ -13,9 +13,6 @@ def detect_all_circles(image_path):
     """
     Detect both filled and unfilled circles from OMR sheet
     """
-    print("="*80)
-    print("OMR Sheet Circle Detection")
-    print("="*80)
     
     # Load image
     img = cv2.imread(image_path)
@@ -54,7 +51,6 @@ def detect_all_circles(image_path):
         return None, None, None
     
     circles = np.uint16(np.around(circles[0]))
-    print(f"✓ Found {len(circles)} total circles")
     
     # Separate filled and unfilled circles
     all_circles = []
@@ -90,10 +86,6 @@ def detect_all_circles(image_path):
             
             if circle_data['filled']:
                 filled_circles.append(circle_data)
-    
-    print(f"✓ Total circles in grid: {len(all_circles)}")
-    print(f"✓ Filled circles: {len(filled_circles)}")
-    print(f"✓ Unfilled circles: {len(all_circles) - len(filled_circles)}")
     
     if not all_circles:
         print("❌ No circles found in grid!")
@@ -145,13 +137,10 @@ def determine_answers(all_circles):
     """
     columns = group_circles_by_columns(all_circles)
     
-    print(f"\n✓ Organized into {len(columns)} columns")
-    
     answers = {}
     questions_per_column = 0
     
     for col_idx, column in enumerate(columns):
-        print(f"\nColumn {col_idx + 1}:")
         
         # Group circles in this column by Y position (each group = 1 question with 4 options)
         column_sorted = sorted(column, key=lambda c: c['y'])
@@ -186,7 +175,6 @@ def determine_answers(all_circles):
                 
                 if circle['filled']:
                     answers[question_num] = option_num
-                    print(f"  Q{question_num}: Option {option_num} filled")
                     break
     
     return answers, columns
@@ -195,8 +183,6 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
     """
     Create debug visualization showing all circles and marked answers
     """
-    print("\nCreating visualization...")
-    
     debug_img = img_rgb.copy()
     
     # Draw grid boundary
@@ -228,11 +214,8 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
             current_row = [all_sorted[i]]
     question_rows.append(current_row)
     
-    # Count total questions (rows)
-    total_questions = len(question_rows)
-    
     # Title
-    title = f"Detected: {len(answers_dict)} answers from {total_questions} questions"
+    title = f"Detected: {len(answers_dict)} answers"
     cv2.putText(debug_img, title, (50, 50),
                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 0), 2, cv2.LINE_AA)
     
@@ -307,15 +290,6 @@ def main():
                 curr = [col_sorted[i]]
         q_groups.append(curr)
         total_questions += len(q_groups)
-    
-    print(f"\n✅ Detection complete!")
-    print(f"\nSummary:")
-    print(f"  Total questions: {total_questions}")
-    print(f"  Answered: {len(answers)}")
-    print(f"  Unanswered: {total_questions - len(answers)}")
-    print(f"\nGenerated files:")
-    print(f"  📄 detected_answers.json - Question-Answer pairs")
-    print(f"  🖼️  omr_detection_result.png - Visualization")
     
     return 0
 
