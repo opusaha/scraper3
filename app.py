@@ -216,8 +216,6 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds):
     
     # Title
     title = f"Detected: {len(answers_dict)} answers"
-    cv2.putText(debug_img, title, (50, 50),
-               cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 0), 2, cv2.LINE_AA)
     
     # Save
     output_file = 'omr_detection_result.png'
