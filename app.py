@@ -1,17 +1,36 @@
 """
-OMR Sheet Answer Detector
+OMR Sheet Answer Detector API
 Detects both filled and unfilled circles and determines which option is marked
+Flask API version for web-based processing
 """
 
+from flask import Flask, request, jsonify, send_file
+from werkzeug.utils import secure_filename
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import sys
 import json
 import io
+import os
+import uuid
+from datetime import datetime
 
-# Set UTF-8 encoding for console output
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# Initialize Flask app
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['RESULT_FOLDER'] = 'results'
+
+# Ensure directories exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['RESULT_FOLDER'], exist_ok=True)
+
+# Allowed file extensions
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp', 'tiff'}
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def detect_all_circles(image_path):
     """
@@ -183,7 +202,7 @@ def determine_answers(all_circles):
     
     return answers, columns
 
-def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds, wrong_answers=None):
+def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds, wrong_answers=None, session_id=None):
     """
     Create debug visualization showing all circles and marked answers
     Mark wrong answers in red if provided
@@ -280,8 +299,13 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds, wrong_
     else:
         title = f"Detected: {len(answers_dict)} answers"
     
-    # Save
-    output_file = 'omr_detection_result.png'
+    # Generate unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if session_id:
+        output_file = f"{app.config['RESULT_FOLDER']}/omr_result_{session_id}_{timestamp}.png"
+    else:
+        output_file = f"{app.config['RESULT_FOLDER']}/omr_result_{timestamp}.png"
+    
     plt.figure(figsize=(15, 28))
     plt.imshow(debug_img)
     plt.title(title, fontsize=16, pad=20)
@@ -290,22 +314,26 @@ def create_visualization(img_rgb, all_circles, answers_dict, grid_bounds, wrong_
     plt.savefig(output_file, dpi=200, bbox_inches='tight')
     plt.close()
     
-    print(f"Visualization saved: {output_file}")
     return output_file
 
-def save_results(answers):
+def save_results(answers, session_id=None):
     """
     Save answers in JSON format
     """
     # Convert to string keys for JSON
     result = {str(q): opt for q, opt in sorted(answers.items())}
     
-    # Save to JSON file
-    json_file = 'detected_answers.json'
+    # Generate unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if session_id:
+        json_file = f"{app.config['RESULT_FOLDER']}/detected_answers_{session_id}_{timestamp}.json"
+    else:
+        json_file = f"{app.config['RESULT_FOLDER']}/detected_answers_{timestamp}.json"
+    
     with open(json_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     
-    print(f"Results saved: {json_file} ({len(result)} answers)")
+    return json_file, result
 
 def compare_with_correct_answers(detected_answers, correct_answer_file='correct_answer.json'):
     """
@@ -380,56 +408,196 @@ def compare_with_correct_answers(detected_answers, correct_answer_file='correct_
     
     return right, wrong, wrong_list
 
-def main():
-    """Main function"""
-    # Default image
-    image_path = 'nexesai.test_omr-sheet_16_answer.png'
-    
-    # Check for command line argument
-    if len(sys.argv) > 1:
-        image_path = sys.argv[1]
-    
-    print(f"\nProcessing: {image_path}\n")
-    
-    # Detect circles
-    result = detect_all_circles(image_path)
-    
-    if result is None or result[0] is None:
-        print("\nDetection failed!")
-        return 1
-    
-    img_rgb, all_circles, filled_circles, grid_bounds = result
-    
-    # Determine answers
-    answers, rows = determine_answers(all_circles)
-    
-    # Save results
-    save_results(answers)
-    
-    # Compare with correct answers
-    comparison_result = compare_with_correct_answers(answers, 'correct_answer.json')
-    
-    # Create visualization with wrong answers marked
-    wrong_list = comparison_result[2] if comparison_result else None
-    create_visualization(img_rgb, all_circles, answers, grid_bounds, wrong_list)
-    
-    # Count total questions
-    columns = group_circles_by_columns(all_circles)
-    total_questions = 0
-    for col in columns:
-        col_sorted = sorted(col, key=lambda c: c['y'])
-        q_groups = []
-        curr = [col_sorted[0]]
-        for i in range(1, len(col_sorted)):
-            if abs(col_sorted[i]['y'] - curr[-1]['y']) < 30:
-                curr.append(col_sorted[i])
-            else:
-                q_groups.append(curr)
-                curr = [col_sorted[i]]
-        q_groups.append(curr)
-        total_questions += len(q_groups)
-    
-    return 0
+# API Routes
+
+@app.route('/', methods=['GET'])
+def home():
+    """Home endpoint with API documentation"""
+    return jsonify({
+        'message': 'OMR Sheet Answer Detector API',
+        'version': '1.0',
+        'endpoints': {
+            'POST /upload': 'Upload OMR sheet image for processing',
+            'GET /health': 'Health check endpoint',
+            'GET /results/<session_id>': 'Get processing results by session ID'
+        },
+        'supported_formats': list(ALLOWED_EXTENSIONS),
+        'max_file_size': '16MB'
+    })
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'version': '1.0'
+    })
+
+@app.route('/upload', methods=['POST'])
+def upload_and_process():
+    """Upload OMR sheet image and process it"""
+    try:
+        # Check if file is present
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        
+        # Check if file is selected
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Check file extension
+        if not allowed_file(file.filename):
+            return jsonify({
+                'error': 'Invalid file type',
+                'supported_types': list(ALLOWED_EXTENSIONS)
+            }), 400
+        
+        # Generate unique session ID
+        session_id = str(uuid.uuid4())
+        
+        # Save uploaded file
+        filename = secure_filename(file.filename)
+        file_extension = filename.rsplit('.', 1)[1].lower()
+        uploaded_filename = f"{session_id}.{file_extension}"
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], uploaded_filename)
+        file.save(file_path)
+        
+        # Process the image
+        result = detect_all_circles(file_path)
+        
+        if result is None or result[0] is None:
+            # Clean up uploaded file
+            os.remove(file_path)
+            return jsonify({'error': 'Failed to detect circles in image'}), 400
+        
+        img_rgb, all_circles, filled_circles, grid_bounds = result
+        
+        # Determine answers
+        answers, columns = determine_answers(all_circles)
+        
+        # Save results
+        json_file, answers_data = save_results(answers, session_id)
+        
+        # Compare with correct answers if available
+        comparison_result = None
+        try:
+            comparison_result = compare_with_correct_answers(answers, 'correct_answer.json')
+        except Exception as e:
+            # Comparison failed, but continue without it
+            pass
+        
+        # Create visualization
+        wrong_list = comparison_result[2] if comparison_result else None
+        visualization_file = create_visualization(img_rgb, all_circles, answers, grid_bounds, wrong_list, session_id)
+        
+        # Prepare response
+        response_data = {
+            'session_id': session_id,
+            'status': 'success',
+            'total_questions': len(answers),
+            'detected_answers': answers_data,
+            'files': {
+                'visualization': visualization_file,
+                'json_results': json_file
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Add comparison results if available
+        if comparison_result:
+            right, wrong, wrong_list = comparison_result
+            accuracy = (right / (right + wrong) * 100) if (right + wrong) > 0 else 0
+            
+            response_data['comparison'] = {
+                'total': right + wrong,
+                'correct': right,
+                'incorrect': wrong,
+                'accuracy': round(accuracy, 2),
+                'wrong_answers': wrong_list
+            }
+        
+        # Clean up uploaded file
+        os.remove(file_path)
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        # Clean up uploaded file if it exists
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)
+        
+        return jsonify({
+            'error': 'Processing failed',
+            'message': str(e)
+        }), 500
+
+@app.route('/results/<session_id>', methods=['GET'])
+def get_results(session_id):
+    """Get results by session ID"""
+    try:
+        # Look for result files with this session ID
+        result_files = []
+        for filename in os.listdir(app.config['RESULT_FOLDER']):
+            if session_id in filename:
+                result_files.append(filename)
+        
+        if not result_files:
+            return jsonify({'error': 'No results found for this session ID'}), 404
+        
+        # Find JSON result file
+        json_file = None
+        visualization_file = None
+        
+        for filename in result_files:
+            if filename.endswith('.json'):
+                json_file = filename
+            elif filename.endswith('.png'):
+                visualization_file = filename
+        
+        response_data = {
+            'session_id': session_id,
+            'files': {}
+        }
+        
+        # Load JSON results if available
+        if json_file:
+            json_path = os.path.join(app.config['RESULT_FOLDER'], json_file)
+            with open(json_path, 'r', encoding='utf-8') as f:
+                answers_data = json.load(f)
+            response_data['detected_answers'] = answers_data
+            response_data['files']['json_results'] = json_file
+        
+        # Add visualization file if available
+        if visualization_file:
+            response_data['files']['visualization'] = visualization_file
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to retrieve results',
+            'message': str(e)
+        }), 500
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    """Download result files"""
+    try:
+        file_path = os.path.join(app.config['RESULT_FOLDER'], filename)
+        
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+        
+        return send_file(file_path, as_attachment=True)
+        
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to download file',
+            'message': str(e)
+        }), 500
 
 if __name__ == "__main__":
-    exit(main())
+    app.run(debug=True, host='127.0.0.1', port=8080)

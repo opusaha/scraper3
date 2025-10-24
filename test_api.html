@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OMR Sheet Detector API Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-section {
+            border: 2px dashed #ddd;
+            padding: 30px;
+            text-align: center;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .upload-section:hover {
+            border-color: #007bff;
+        }
+        input[type="file"] {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            width: 100%;
+            max-width: 400px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .result-section {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            display: none;
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .loading {
+            text-align: center;
+            color: #007bff;
+        }
+        pre {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+        }
+        .download-links {
+            margin-top: 15px;
+        }
+        .download-links a {
+            display: inline-block;
+            margin: 5px 10px;
+            padding: 8px 16px;
+            background-color: #28a745;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+        }
+        .download-links a:hover {
+            background-color: #218838;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>OMR Sheet Answer Detector API</h1>
+        
+        <div class="upload-section">
+            <h3>Upload OMR Sheet Image</h3>
+            <p>Supported formats: PNG, JPG, JPEG, BMP, TIFF</p>
+            <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.bmp,.tiff">
+            <br>
+            <button onclick="uploadFile()" id="uploadBtn">Process Image</button>
+            <button onclick="checkHealth()" id="healthBtn">Check API Health</button>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">
+            <p>Processing image... Please wait.</p>
+        </div>
+
+        <div id="resultSection" class="result-section">
+            <h3>Processing Results</h3>
+            <div id="resultContent"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8080';
+
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const uploadBtn = document.getElementById('uploadBtn');
+            const loading = document.getElementById('loading');
+            const resultSection = document.getElementById('resultSection');
+            const resultContent = document.getElementById('resultContent');
+
+            if (!fileInput.files[0]) {
+                showError('Please select a file first.');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            // Show loading
+            loading.style.display = 'block';
+            resultSection.style.display = 'none';
+            uploadBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess(data);
+                } else {
+                    showError(data.error || 'Upload failed');
+                }
+            } catch (error) {
+                showError('Network error: ' + error.message);
+            } finally {
+                loading.style.display = 'none';
+                uploadBtn.disabled = false;
+            }
+        }
+
+        async function checkHealth() {
+            const healthBtn = document.getElementById('healthBtn');
+            const resultSection = document.getElementById('resultSection');
+            const resultContent = document.getElementById('resultContent');
+
+            healthBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    resultSection.style.display = 'block';
+                    resultContent.innerHTML = `
+                        <div class="success">API is healthy!</div>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    showError('Health check failed');
+                }
+            } catch (error) {
+                showError('Health check error: ' + error.message);
+            } finally {
+                healthBtn.disabled = false;
+            }
+        }
+
+        function showSuccess(data) {
+            const resultSection = document.getElementById('resultSection');
+            const resultContent = document.getElementById('resultContent');
+
+            let downloadLinks = '';
+            if (data.files) {
+                downloadLinks = `
+                    <div class="download-links">
+                        <h4>Download Results:</h4>
+                        ${data.files.visualization ? 
+                            `<a href="${API_BASE}/download/${data.files.visualization.split('/').pop()}" target="_blank">Download Visualization</a>` : ''}
+                        ${data.files.json_results ? 
+                            `<a href="${API_BASE}/download/${data.files.json_results.split('/').pop()}" target="_blank">Download JSON Results</a>` : ''}
+                    </div>
+                `;
+            }
+
+            resultContent.innerHTML = `
+                <div class="success">Image processed successfully!</div>
+                <h4>Session ID: ${data.session_id}</h4>
+                <h4>Total Questions Detected: ${data.total_questions}</h4>
+                ${data.comparison ? `
+                    <h4>Accuracy: ${data.comparison.accuracy}%</h4>
+                    <p>Correct: ${data.comparison.correct} | Incorrect: ${data.comparison.incorrect}</p>
+                ` : ''}
+                ${downloadLinks}
+                <h4>Detected Answers:</h4>
+                <pre>${JSON.stringify(data.detected_answers, null, 2)}</pre>
+                ${data.comparison && data.comparison.wrong_answers.length > 0 ? `
+                    <h4>Wrong Answers:</h4>
+                    <pre>${JSON.stringify(data.comparison.wrong_answers, null, 2)}</pre>
+                ` : ''}
+            `;
+
+            resultSection.style.display = 'block';
+        }
+
+        function showError(message) {
+            const resultSection = document.getElementById('resultSection');
+            const resultContent = document.getElementById('resultContent');
+
+            resultContent.innerHTML = `
+                <div class="error">Error: ${message}</div>
+            `;
+
+            resultSection.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
